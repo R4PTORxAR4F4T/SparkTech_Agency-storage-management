@@ -1,467 +1,289 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
+const nodemailer = require("nodemailer");
 const cookieParser = require('cookie-parser');
-require('dotenv').config()
+require('dotenv').config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+
 const app = express();
 const cors = require('cors');
 const port = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(express.json())
+app.use(express.json());
 app.use(cookieParser());
 
 const uri = `mongodb+srv://${process.env.DB_user}:${process.env.DB_pass}@cluster0.ihuxcck.mongodb.net/?retryWrites=true&w=majority`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
-    const client = new MongoClient(uri, {
-        serverApi: {
-        version: ServerApiVersion.v1,
-        strict: true,
-        deprecationErrors: true,
-        }
-    });
+const client = new MongoClient(uri, {
+    serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
+    socketTimeoutMS: 60000,
+    connectTimeoutMS: 30000,
+});
 
-    const dbConnect = async () => {
-        try {
-        client.connect();
-        console.log("Database Connected Successfully✅");
-    
-        } catch (error) {
-        console.log(error.name, error.message);
-        }
+const dbConnect = async () => {
+    try {
+        await client.connect();
+        console.log("Database Connected Successfully ✅");
+    } catch (error) {
+        console.error("Database connection error:", error);
     }
+};
 
-    dbConnect()
+dbConnect();
 
-    const usersCollection = client.db('MovieManagement').collection('user');
-    const moviesCollection = client.db('MovieManagement').collection('movie');
-    const ratingsCollection = client.db('MovieManagement').collection('rating');
-    const reportsCollection = client.db('MovieManagement').collection('report');
-    
+const usersCollection = client.db('storage').collection('user');
+const otpCollection = client.db("storage").collection("otp");
 
-    app.get('/',(req,res)=>{
-        res.send('Server is runnning')
-    })
+const notesCollection = client.db('storage').collection('notes');
+const imagesCollection = client.db('storage').collection('images');
+const pdfsCollection = client.db('storage').collection('pdfs');
+const foldersCollection = client.db('storage').collection('folders');
 
-    // checking authentication middleware
-    const authMiddleware = (req, res, next) => {
-      const token = req.cookies?.accessToken || req.headers.authorization?.split(' ')[1];
-    
-      if (!token) {
-          return res.status(401).json({ message: 'Authentication token is missing' });
+const cleanupExpiredOtps = async () => {
+  try {
+      const now = new Date();
+      const result = await otpCollection.deleteMany({ expiry: { $lt: now } });
+      if (result.deletedCount > 0) {
+          console.log(`🗑️ Deleted ${result.deletedCount} expired OTP(s)`);
       }
-  
-      try {
-          const decoded = jwt.verify(token, process.env.JWT_SECRET);
-          req.user = decoded;
-          next();
-      } catch (error) {
-          console.error('Authentication error:', error);
-          return res.status(401).json({ message: 'Invalid or expired token' });
-      }
-    };
+  } catch (error) {
+      console.error("❌ Error deleting expired OTPs:", error);
+  }
+};
 
-    // user register
-    app.post('/control/register', async (req, res) => {
-      const { username, email, password } = req.body;
-    
-      if (!username || !email || !password) {
-        return res.status(400).json({ message: 'All fields are required' });
-      }
-    
-      try {
+setInterval(cleanupExpiredOtps, 60 * 60 * 1000);
+
+
+// Email Transporter
+const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+});
+
+// Root Route
+app.get('/', (req, res) => {
+    res.send('Server is running');
+});
+
+// Authentication Middleware
+const authMiddleware = (req, res, next) => {
+    try {
+        const token = req.cookies?.accessToken || req.headers.authorization?.split(' ')[1];
+        if (!token) return res.status(401).json({ message: 'Authentication token is missing' });
+
+        req.user = jwt.verify(token, process.env.JWT_SECRET);
+        next();
+    } catch (error) {
+        console.error("Auth Middleware Error:", error);
+        return res.status(401).json({ message: 'Invalid or expired token' });
+    }
+};
+
+// User Registration
+app.post('/control/register', async (req, res) => {
+    try {
+        const { username, email, password } = req.body;
+        if (!username || !email || !password) return res.status(400).json({ message: 'All fields are required' });
+
         const existingUser = await usersCollection.findOne({ email });
-        if (existingUser) {
-          return res.status(400).json({ message: 'User already exists' });
-        }
+        if (existingUser) return res.status(400).json({ message: 'User already exists' });
 
         const hashedPassword = await bcrypt.hash(password, 10);
-    
-        const newUser = {
-          username,
-          email,
-          password: hashedPassword,
-          role: "user",
-          created_at: new Date(),
-          updated_at: new Date(),
-        };
+        const newUser = { username, email, password: hashedPassword, role: "user", created_at: new Date() };
         await usersCollection.insertOne(newUser);
-    
-        const { password: _, ...userWithoutPassword } = newUser;
-        res.status(201).json({ message: 'User registered successfully', user: userWithoutPassword });
-      } catch (error) {
-        console.error('Error during registration:', error);
-        res.status(500).json({ message: 'An error occurred during registration', error: error.message });
-      }
-    });
-    
-    // Login Endpoint
-    app.post('/control/login', async (req, res) => {
-      const { identifier, password } = req.body;
 
-      try {
-        let user;
-        //Indentify Identifier is a email or username
-        if (identifier.includes('@')) {
-          user = await usersCollection.findOne({ email: identifier });
-        } else {
-          user = await usersCollection.findOne({ username: identifier });
+        res.status(201).json({ message: 'User registered successfully' });
+    } catch (error) {
+        console.error("Registration Error:", error);
+        res.status(500).json({ message: 'Registration failed', error: error.message });
+    }
+});
+
+// User Login
+app.post('/control/login', async (req, res) => {
+    try {
+        const { identifier, password } = req.body;
+        const user = await usersCollection.findOne({ $or: [{ email: identifier }, { username: identifier }] });
+        if (!user) return res.status(401).json({ message: 'Invalid credentials' });
+
+        const passwordMatch = user.password.startsWith('$2b$') ? await bcrypt.compare(password, user.password) : user.password === password;
+        if (!passwordMatch) return res.status(401).json({ message: 'Invalid credentials' });
+
+        if (!user.password.startsWith('$2b$')) {
+            user.password = await bcrypt.hash(password, 10);
+            await usersCollection.updateOne({ _id: user._id }, { $set: { password: user.password } });
         }
 
-        if (!user) {
-          return res.status(401).json({ message: 'Invalid email, username, or password' });
-        }
+        const token = jwt.sign({ sub: user._id, email: user.email, username: user.username, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-        let passwordMatch = false;
-        if (user.password.startsWith('$2b$')) {
-          passwordMatch = await bcrypt.compare(password, user.password);
-        }
-        else {
-          passwordMatch = user.password === password;
-          if (passwordMatch) {
-            const hashedPassword = await bcrypt.hash(password, 10);
-            await usersCollection.updateOne(
-              { _id: user._id },
-              { $set: { password: hashedPassword } }
-            );
-          }
-        }
-
-        if (!passwordMatch) {
-            return res.status(401).json({ message: 'Invalid email, username, or password' });
-        }
-        // Step 3: Generate JWT Token
-        const payload = { sub: user._id, email: user.email, username: user.username, role: user.role };
-        const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
-        
-        // Step 4: Set cookies
-        res.cookie('accessToken', token, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-        });
-
-        res.cookie('user', JSON.stringify(user), { 
-          httpOnly: false, // Accessible to client-side scripts 
-          secure: process.env.NODE_ENV === 'production', 
-          maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days 
-        });
-
-        // Step 5: Send response
+        res.cookie('accessToken', token, { httpOnly: true, secure: process.env.NODE_ENV === 'production', maxAge: 604800000 });
         res.status(200).json({ message: 'Login successful' });
-      }catch (error) {
-        console.error('Error during login:', error);
-        res.status(500).json({ message: 'An error occurred during login', error: error.message });
-      }
-    })
+    } catch (error) {
+        console.error("Login Error:", error);
+        res.status(500).json({ message: 'Login failed', error: error.message });
+    }
+});
 
-    //log out account
-    app.post('/control/logout', (req, res) => {
-      try {
-        // Clear the cookies
-        res.clearCookie('accessToken', {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-        });
-    
-        res.clearCookie('user', {
-          httpOnly: false,
-          secure: process.env.NODE_ENV === 'production',
-        });
-    
-        // Send a response
+// Logout
+app.post('/control/logout', (req, res) => {
+    try {
+        res.clearCookie('accessToken', { httpOnly: true, secure: process.env.NODE_ENV === 'production' });
         res.status(200).json({ message: 'Logout successful' });
-      } catch (error) {
-        console.error('Error during logout:', error);
-        res.status(500).json({ message: 'An error occurred during logout', error: error.message });
-      }
-    });
-  
-    //getting all movie list
-    app.get('/control/allmovie', authMiddleware, async(req,res) => {
-      const result = await moviesCollection.find().toArray();
-      res.send(result);
-    })
+    } catch (error) {
+        console.error("Logout Error:", error);
+        res.status(500).json({ message: 'Logout failed', error: error.message });
+    }
+});
 
-    //only user movie who loged in
-    app.get('/control/ownmovie', authMiddleware, async (req, res) => {
-      const username = req.user.username;
-      
-      try {
-        // Find all movies added by this user
-        const userMovies = await moviesCollection.find({ created_by : username }).toArray();
-    
-        if (!userMovies.length) {
-          return res.status(404).json({ message: 'No movies found for this user' });
-        }
-    
-        res.status(200).json({ message: 'Movies retrieved successfully', movies: userMovies });
-      } catch (error) {
-        console.error('Error fetching user movies:', error);
-        res.status(500).json({ message: 'An error occurred while fetching user movies', error: error.message });
-      }
-    });
+// Forgot Password - Send OTP
+app.post("/control/forgot-password", async (req, res) => {
+    try {
+        const { email } = req.body;
+        const user = await usersCollection.findOne({ email });
+        if (!user) return res.status(404).json({ message: "❌ User not found" });
 
-    //movie details
-    app.get('/control/movie/:id', authMiddleware, async (req, res) => {
-      const movieId = req.params.id;
-      try {
-        // find the movie with id using findOne
-        const movieDetails = await moviesCollection.findOne({ _id: new ObjectId(movieId) });
-        
-        if (!movieDetails) {
-          return res.status(404).json({ message: 'No movie found' });
-        }
-    
-        res.status(200).json({ message: 'Movie found successfully', movie: movieDetails });
-      } catch (error) {
-        console.error('Error fetching movie:', error);
-        res.status(500).json({ message: 'An error occurred while fetching the movie', error: error.message });
-      }
-    });
-    
-    //create movie
-    app.post('/control/createmovie', authMiddleware, async (req, res) =>{
-      
-      try {
-        const { title, description, released_at, duration, genre, language, avg_rating, total_rating } = req.body;
-        const username = req.user.username;
-    
-        const requiredFields = { title, description, released_at, duration, genre, language, avg_rating, total_rating };
-        for (let key in requiredFields) {
-          if (!requiredFields[key]) {
-            return res.status(400).json({ message: `${key.charAt(0).toUpperCase() + key.slice(1)} is required and cannot be empty` });
-          }
-        }
-      
-        const movieData = {
+        const otp = Math.random().toString().slice(2, 8);
+        await otpCollection.insertOne({ email, otp, expiry: new Date(Date.now() + 300000) });
+
+        await transporter.sendMail({ from: process.env.EMAIL_USER, to: email, subject: "Password Reset OTP", text: `Your OTP is ${otp}` });
+        res.json({ message: "✅ OTP sent" });
+    } catch (error) {
+        console.error("Forgot Password Error:", error);
+        res.status(500).json({ message: "❌ Email sending failed" });
+    }
+});
+
+// Verify OTP
+app.post("/control/verify-otp", async (req, res) => {
+    try {
+        const { email, otp } = req.body;
+        const otpData = await otpCollection.findOne({ email });
+
+        if (!otpData) return res.status(400).json({ message: "❌ No OTP found" });
+        if (new Date() > otpData.expiry) return res.status(400).json({ message: "❌ Expired OTP" });
+
+        if (otpData.otp !== otp.toString()) return res.status(400).json({ message: "❌ Invalid OTP" });
+
+        await otpCollection.deleteOne({ email });
+        res.json({ message: "✅ OTP verified" });
+    } catch (error) {
+        console.error("OTP Verification Error:", error);
+        res.status(500).json({ message: "❌ OTP verification failed" });
+    }
+});
+
+// Reset Password
+app.post("/reset-password", async (req, res) => {
+    try {
+        const { email, otp, newPassword } = req.body;
+        const otpData = await otpCollection.findOne({ email, otp });
+        if (!otpData || new Date() > otpData.expiry) return res.status(400).json({ message: "❌ Invalid or expired OTP" });
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await usersCollection.updateOne({ email }, { $set: { password: hashedPassword } });
+        await otpCollection.deleteOne({ email, otp });
+
+        res.json({ message: "✅ Password reset successfully" });
+    } catch (error) {
+        console.error("Reset Password Error:", error);
+        res.status(500).json({ message: "❌ Password reset failed" });
+    }
+});
+
+// Add Note
+app.post('/control/add-note', authMiddleware, async (req, res) => {
+  try {
+      const { title, content } = req.body;
+      if (!title || !content) return res.status(400).json({ message: 'Title and content are required' });
+
+      const existingNote = await notesCollection.findOne({ userId: req.user.sub, title });
+      if (existingNote) return res.status(400).json({ message: 'A note with this title already exists' });
+
+      await notesCollection.insertOne({
+          userId: req.user.sub,
           title,
+          content,
+          type: "note",  // 👈 Store the file type
+          createdAt: new Date()
+      });
+      res.status(201).json({ message: 'Note added successfully' });
+  } catch (error) {
+      console.error("Add Note Error:", error);
+      res.status(500).json({ message: 'Failed to add note', error: error.message });
+  }
+});
+
+// Import Image
+app.post('/control/import-image', authMiddleware, async (req, res) => {
+  try {
+      const { imageUrl, description } = req.body;
+      if (!imageUrl) return res.status(400).json({ message: 'Image URL is required' });
+
+      const existingImage = await imagesCollection.findOne({ userId: req.user.sub, imageUrl });
+      if (existingImage) return res.status(400).json({ message: 'This image is already imported' });
+
+      await imagesCollection.insertOne({
+          userId: req.user.sub,
+          imageUrl,
           description,
-          released_at,
-          duration,
-          genre,
-          language,
-          created_by: username,
-          avg_rating,
-          total_rating,
-          created_at: new Date(),
-          updated_at: new Date()
-        };
-    
-        const result = await moviesCollection.insertOne(movieData);
-    
-        res.status(200).json({ message: 'Movie created successfully' });
-      } catch (error) {
-        console.error('Error creating movie:', error);
-        res.status(500).json({ message: 'An error occurred while creating the movie', error: error.message });
-      }
-    });
-    
-    // update movie
-    app.patch('/control/updatemovie/:id',authMiddleware,async(req,res)=>{
-      try {
-        const movieId = req.params.id;
-        const username = req.user.username;
-        const updates = req.body;
-    
-        const restrictedFields = ['_id', 'created_by', 'avg_rating', 'total_rating', 'created_at'];
-    
-        const movie = await moviesCollection.findOne({ _id: new ObjectId(movieId) });
-        if (!movie) {
-          return res.status(404).json({ message: 'Movie not found' });
-        }
+          type: "image",  // 👈 Store the file type
+          uploadedAt: new Date()
+      });
+      res.status(201).json({ message: 'Image imported successfully' });
+  } catch (error) {
+      console.error("Import Image Error:", error);
+      res.status(500).json({ message: 'Failed to import image', error: error.message });
+  }
+});
+
+// Import PDF
+app.post('/control/import-pdf', authMiddleware, async (req, res) => {
+  try {
+      const { pdfUrl, title } = req.body;
+      if (!pdfUrl || !title) return res.status(400).json({ message: 'PDF URL and title are required' });
+
+      const existingPDF = await pdfsCollection.findOne({ userId: req.user.sub, pdfUrl });
+      if (existingPDF) return res.status(400).json({ message: 'This PDF is already imported' });
+
+      await pdfsCollection.insertOne({
+          userId: req.user.sub,
+          pdfUrl,
+          title,
+          type: "pdf",  // 👈 Store the file type
+          uploadedAt: new Date()
+      });
+      res.status(201).json({ message: 'PDF imported successfully' });
+  } catch (error) {
+      console.error("Import PDF Error:", error);
+      res.status(500).json({ message: 'Failed to import PDF', error: error.message });
+  }
+});
+
+// Create Folder
+app.post('/control/create-folder', authMiddleware, async (req, res) => {
+  try {
+      const { folderName } = req.body;
+      if (!folderName) return res.status(400).json({ message: 'Folder name is required' });
+
+      const existingFolder = await foldersCollection.findOne({ userId: req.user.sub, folderName });
+      if (existingFolder) return res.status(400).json({ message: 'A folder with this name already exists' });
+
+      await foldersCollection.insertOne({
+          userId: req.user.sub,
+          folderName,
+          type: "folder",  // 👈 Store the file type
+          createdAt: new Date()
+      });
+      res.status(201).json({ message: 'Folder created successfully' });
+  } catch (error) {
+      console.error("Create Folder Error:", error);
+      res.status(500).json({ message: 'Failed to create folder', error: error.message });
+  }
+});
 
 
-        if (movie.created_by !== username) {
-          return res.status(403).json({ message: 'You are not authorized to update this movie' });
-        }
-    
-        // Remove restricted fields from updates
-        const filteredUpdates = {};
-        for (let key in updates) {
-          if (!restrictedFields.includes(key)) {
-            filteredUpdates[key] = updates[key];
-          }
-        }
-    
-        filteredUpdates.updated_at = new Date();
 
-        const result = await moviesCollection.updateOne(
-          { _id: new ObjectId(movieId) },
-          { $set: filteredUpdates }
-        );
-    
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ message: 'Movie not found for updating' });
-        }
-    
-        res.status(200).json({ message: 'Movie updated successfully' });
-      } catch (error) {
-        console.error('Error updating movie:', error);
-        res.status(500).json({ message: 'An error occurred while updating the movie', error: error.message });
-      }
-    })
-    
-    // Add or update a rating
-    app.post('/control/ratemovie/:movieId', authMiddleware, async (req, res) => {
-      try {
-        const movieId = req.params.movieId;
-        const userId = req.user.sub;
-        const { rating } = req.body;
-
-        if (!rating || rating < 1 || rating > 5) {
-          return res.status(400).json({ message: 'Rating must be between 1 and 5' });
-        }
-
-        const movie = await moviesCollection.findOne({ _id: new ObjectId(movieId) });
-        if (!movie) {
-          return res.status(404).json({ message: 'Movie not found' });
-        }
-
-        // Check if user already rated this movie
-        const existingRating = await ratingsCollection.findOne({ user_id: userId, movie_id: movieId });
-
-        if (existingRating) {
-          // Update the existing rating
-          await ratingsCollection.updateOne(
-            { user_id: userId, movie_id: movieId },
-            { $set: { rating, updated_at: new Date() } }
-          );
-        } else {
-          // Create a new rating
-          await ratingsCollection.insertOne({
-            user_id: userId,
-            movie_id: movieId,
-            rating,
-            created_at: new Date(),
-            updated_at: new Date(),
-          });
-        }
-
-        // Recalculate the average rating and total rating for the movie
-        const ratings = await ratingsCollection.find({ movie_id: movieId }).toArray();
-        const totalRatings = ratings.length;
-        const avgRating = ratings.reduce((sum, r) => sum + r.rating, 0) / totalRatings;
-
-        // Update the movie document
-        await moviesCollection.updateOne(
-          { _id: new ObjectId(movieId) },
-          { $set: { avg_rating: avgRating, total_rating: totalRatings } }
-        );
-
-        res.status(200).json({ message: 'Rating submitted successfully', avg_rating: avgRating, total_rating: totalRatings });
-      } catch (error) {
-        console.error('Error submitting rating:', error);
-        res.status(500).json({ message: 'An error occurred while submitting the rating', error: error.message });
-      }
-    });
-
-    // Report a movie
-    app.post('/control/reportmovie/:movieId', authMiddleware, async (req, res) => {
-      try {
-        const movieId = req.params.movieId;
-        const { reason } = req.body;
-        const username = req.user.username;
-
-        if (!reason) {
-          return res.status(400).json({ message: 'Reason are required' });
-        }
-
-        // Check if the movie exists
-        const movie = await moviesCollection.findOne({ _id: new ObjectId(movieId) });
-        if (!movie) {
-          return res.status(404).json({ message: 'Movie not found' });
-        }
-
-        const reportData = {
-          movieId: new ObjectId(movieId),
-          reported_by: username,
-          reason,
-          status: 'pending', // Can be 'pending', 'approved', or 'rejected'
-          created_at: new Date(),
-        };
-
-        const result = await reportsCollection.insertOne(reportData);
-        res.status(201).json({ message: 'Movie reported successfully', report: result });
-      } catch (error) {
-        console.error('Error reporting movie:', error);
-        res.status(500).json({ message: 'An error occurred while reporting the movie', error: error.message });
-      }
-    });
-
-    // View all reported movies
-    app.get('/control/admin/reportedmovies', authMiddleware, async (req, res) => {
-      try {
-        const { role } = req.user;
-        if (role !== 'admin') {
-          return res.status(401).json({ message: 'Authentication token is missing' });
-        }
-        const result = await reportsCollection.find().toArray();
-        res.status(200).json({ message: 'Reported movies retrieved successfully', result });
-      } catch (error) {
-        console.error('Error retrieving reported movies:', error);
-        res.status(500).json({ message: 'An error occurred while retrieving reported movies', error: error.message });
-      }
-    });
-
-    // Reject a movie report
-    app.patch('/control/admin/rejectreport/:reportId', authMiddleware, async (req, res) => {
-      try {
-        const { role } = req.user;
-        if (role !== 'admin') {
-          return res.status(403).json({ message: 'Access denied: Admins only' });
-        }
-
-        const reportId = req.params.reportId;
-        const result = await reportsCollection.updateOne(
-          { _id: new ObjectId(reportId) },
-          { $set: { status: 'rejected', updated_at: new Date() } }
-        );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ message: 'Report not found' });
-        }
-
-        res.status(200).json({ message: 'Report rejected successfully' });
-      } catch (error) {
-        console.error('Error rejecting report:', error);
-        res.status(500).json({ message: 'An error occurred while rejecting the report', error: error.message });
-      }
-    });
-
-    // Approove a movie report
-    app.patch('/control/admin/approvereport/:reportId', authMiddleware, async (req, res) => {
-      try {
-        const { role } = req.user;
-        if (role !== 'admin') {
-          return res.status(403).json({ message: 'Access denied: Admins only' });
-        }
-
-        const reportId = req.params.reportId;
-        const result = await reportsCollection.updateOne(
-          { _id: new ObjectId(reportId) },
-          { $set: { status: 'approved', updated_at: new Date() } }
-        );
-
-        if (result.matchedCount === 0) {
-          return res.status(404).json({ message: 'Report not found' });
-        }
-
-        res.status(200).json({ message: 'Report approved successfully' });
-      } catch (error) {
-        console.error('Error approving report:', error);
-        res.status(500).json({ message: 'An error occurred while approving the report', error: error.message });
-      }
-    });
-
-
-    app.listen(port,()=>{
-        console.log(`surver is running on port ${port}`);
-    })
-
-    
-  
-
-    
+// Start Server
+app.listen(port, () => console.log(`Server running on port ${port}`));
