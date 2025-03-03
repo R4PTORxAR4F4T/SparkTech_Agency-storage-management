@@ -195,7 +195,7 @@ app.post("/reset-password", async (req, res) => {
 // Add Note
 app.post('/control/add-note', authMiddleware, async (req, res) => {
   try {
-      const { title, content } = req.body;
+      const { name, content } = req.body;
       if (!title || !content) return res.status(400).json({ message: 'Title and content are required' });
 
       const existingNote = await notesCollection.findOne({ userId: req.user.sub, title });
@@ -280,6 +280,137 @@ app.post('/control/create-folder', authMiddleware, async (req, res) => {
   } catch (error) {
       console.error("Create Folder Error:", error);
       res.status(500).json({ message: 'Failed to create folder', error: error.message });
+  }
+});
+
+function getCollectionByType(type) {
+  switch (type) {
+      case 'image': return imagesCollection;
+      case 'folder': return foldersCollection;
+      case 'note': return notesCollection;
+      case 'pdf': return pdfsCollection;
+      default: throw new Error('Invalid type');
+  }
+}
+
+//Favorite item
+app.post('/control/favorite', authMiddleware, async (req, res) => {
+  try {
+      const { itemId, type } = req.body; // type: 'image', 'folder', 'note', 'pdf'
+      if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
+
+      const collection = getCollectionByType(type);
+      const item = await collection.findOne({ _id: new ObjectId(itemId) });
+
+      if (!item) return res.status(404).json({ message: 'Item not found' });
+
+      await collection.updateOne({ _id: new ObjectId(itemId) }, { $set: { isFavorite: true } });
+      res.json({ message: `${type} marked as favorite` });
+
+  } catch (error) {
+      res.status(500).json({ message: 'Failed to mark favorite', error: error.message });
+  }
+});
+
+//Copy item
+app.post('/control/copy', authMiddleware, async (req, res) => {
+  try {
+      const { itemId, type } = req.body;
+      if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
+
+      const collection = getCollectionByType(type);
+      const item = await collection.findOne({ _id: new ObjectId(itemId) });
+
+      if (!item) return res.status(404).json({ message: 'Item not found' });
+
+      const newItem = { ...item, _id: new ObjectId(), copiedAt: new Date() };
+      delete newItem._id; // Remove old ID
+
+      await collection.insertOne(newItem);
+      res.json({ message: `${type} copied successfully` });
+
+  } catch (error) {
+      res.status(500).json({ message: 'Failed to copy item', error: error.message });
+  }
+});
+
+//Rename item
+app.post('/control/rename', authMiddleware, async (req, res) => {
+  try {
+      const { itemId, type, newName } = req.body;
+      if (!itemId || !type || !newName) return res.status(400).json({ message: 'Item ID, type, and new name are required' });
+
+      const collection = getCollectionByType(type);
+
+      let updateField;
+      switch (type) {
+          case 'note': updateField = 'title'; break;
+          case 'image': updateField = 'description'; break;
+          case 'pdf': updateField = 'title'; break;
+          case 'folder': updateField = 'folderName'; break;
+          default: return res.status(400).json({ message: 'Invalid type' });
+      }
+
+      await collection.updateOne({ _id: new ObjectId(itemId) }, { $set: { [updateField]: newName } });
+
+      res.json({ message: `${type} renamed successfully` });
+
+  } catch (error) {
+      res.status(500).json({ message: 'Failed to rename item', error: error.message });
+  }
+});
+
+//Duplicate item
+app.post('/control/duplicate', authMiddleware, async (req, res) => {
+  try {
+      const { itemId, type } = req.body;
+      if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
+
+      const collection = getCollectionByType(type);
+      const item = await collection.findOne({ _id: new ObjectId(itemId) });
+
+      if (!item) return res.status(404).json({ message: 'Item not found' });
+
+      const newItem = { ...item, _id: new ObjectId(), name: item.name + ' - Copy', duplicatedAt: new Date() };
+      delete newItem._id;
+
+      await collection.insertOne(newItem);
+      res.json({ message: `${type} duplicated successfully` });
+
+  } catch (error) {
+      res.status(500).json({ message: 'Failed to duplicate item', error: error.message });
+  }
+});
+
+//Delete item
+app.delete('/control/delete', authMiddleware, async (req, res) => {
+  try {
+      const { itemId, type } = req.body;
+      if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
+
+      const collection = getCollectionByType(type);
+      await collection.deleteOne({ _id: new ObjectId(itemId) });
+
+      res.json({ message: `${type} deleted successfully` });
+
+  } catch (error) {
+      res.status(500).json({ message: 'Failed to delete item', error: error.message });
+  }
+});
+
+//Share item
+app.post('/control/share', authMiddleware, async (req, res) => {
+  try {
+      const { itemId, type, sharedWithUserId } = req.body;
+      if (!itemId || !type || !sharedWithUserId) return res.status(400).json({ message: 'Item ID, type, and shared user ID are required' });
+
+      const collection = getCollectionByType(type);
+      await collection.updateOne({ _id: new ObjectId(itemId) }, { $addToSet: { sharedWith: sharedWithUserId } });
+
+      res.json({ message: `${type} shared successfully` });
+
+  } catch (error) {
+      res.status(500).json({ message: 'Failed to share item', error: error.message });
   }
 });
 
