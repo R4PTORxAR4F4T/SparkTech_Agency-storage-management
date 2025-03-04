@@ -205,7 +205,7 @@ app.post('/control/add-note', authMiddleware, async (req, res) => {
           userId: req.user.sub,
           title,
           content,
-          type: "note",  // 👈 Store the file type
+          type: "note",
           createdAt: new Date()
       });
       res.status(201).json({ message: 'Note added successfully' });
@@ -228,7 +228,7 @@ app.post('/control/import-image', authMiddleware, async (req, res) => {
           userId: req.user.sub,
           imageUrl,
           description,
-          type: "image",  // 👈 Store the file type
+          type: "image",
           uploadedAt: new Date()
       });
       res.status(201).json({ message: 'Image imported successfully' });
@@ -251,7 +251,7 @@ app.post('/control/import-pdf', authMiddleware, async (req, res) => {
           userId: req.user.sub,
           pdfUrl,
           title,
-          type: "pdf",  // 👈 Store the file type
+          type: "pdf",
           uploadedAt: new Date()
       });
       res.status(201).json({ message: 'PDF imported successfully' });
@@ -273,7 +273,7 @@ app.post('/control/create-folder', authMiddleware, async (req, res) => {
       await foldersCollection.insertOne({
           userId: req.user.sub,
           folderName,
-          type: "folder",  // 👈 Store the file type
+          type: "folder",
           createdAt: new Date()
       });
       res.status(201).json({ message: 'Folder created successfully' });
@@ -296,7 +296,7 @@ function getCollectionByType(type) {
 //Favorite item
 app.post('/control/favorite', authMiddleware, async (req, res) => {
   try {
-      const { itemId, type } = req.body; // type: 'image', 'folder', 'note', 'pdf'
+      const { itemId, type } = req.body;
       if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
 
       const collection = getCollectionByType(type);
@@ -312,8 +312,27 @@ app.post('/control/favorite', authMiddleware, async (req, res) => {
   }
 });
 
+//Unfavorite item
+app.post('/control/unfavorite', authMiddleware, async (req, res) => {
+    try {
+        const { itemId, type } = req.body;
+        if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
+  
+        const collection = getCollectionByType(type);
+        const item = await collection.findOne({ _id: new ObjectId(itemId) });
+  
+        if (!item) return res.status(404).json({ message: 'Item not found' });
+  
+        await collection.updateOne({ _id: new ObjectId(itemId) }, { $set: { isFavorite: false } });
+        res.json({ message: `${type} marked as favorite` });
+  
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to mark favorite', error: error.message });
+    }
+  });
+
 //Copy item
-app.post('/control/copy', authMiddleware, async (req, res) => {
+ app.post('/control/copy', authMiddleware, async (req, res) => {
   try {
       const { itemId, type } = req.body;
       if (!itemId || !type) return res.status(400).json({ message: 'Item ID and type are required' });
@@ -324,7 +343,7 @@ app.post('/control/copy', authMiddleware, async (req, res) => {
       if (!item) return res.status(404).json({ message: 'Item not found' });
 
       const newItem = { ...item, _id: new ObjectId(), copiedAt: new Date() };
-      delete newItem._id; // Remove old ID
+      delete newItem._id;
 
       await collection.insertOne(newItem);
       res.json({ message: `${type} copied successfully` });
@@ -414,6 +433,66 @@ app.post('/control/share', authMiddleware, async (req, res) => {
   }
 });
 
+//Get Data by Type
+app.get('/control/typedata', authMiddleware, async (req, res) => {
+    try {
+        const { type } = req.query;
+        if (!type) return res.status(400).json({ message: 'Type is required' });
+  
+        // Function to get the correct collection
+        const collection = getCollectionByType(type);
+        if (!collection) return res.status(400).json({ message: 'Invalid type' });
+  
+        // Retrieve data of the specified type
+        const data = await collection.find().toArray();
+  
+        res.json({ message: `${type} data retrieved successfully`, data });
+  
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to retrieve data', error: error.message });
+    }
+});
+
+//Single Data
+app.get('/control/data', authMiddleware, async (req, res) => {
+    try {
+        const { type, id } = req.query;
+        if (!type) return res.status(400).json({ message: 'Type is required' });
+        
+        const collection = getCollectionByType(type);
+
+        if (id) {
+            const item = await collection.findOne({ _id: new ObjectId(id) });
+            if (!item) return res.status(404).json({ message: 'Item not found' });
+
+            return res.json({ message: 'Item retrieved successfully', data: item });
+        }
+
+        const items = await collection.find().toArray();
+        res.json({ message: `${type} data retrieved successfully`, data: items });
+
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to retrieve data', error: error.message });
+    }
+});
+
+//All Favorite
+app.get('/control/favorites', authMiddleware, async (req, res) => {
+    try {
+        const types = ['image', 'folder', 'note', 'pdf']; // Replace with actual types
+        const results = {};
+
+        for (const type of types) {
+            const collection = getCollectionByType(type);
+            const data = await collection.find({ isFavorite: true }).toArray();
+            results[type] = data;
+        }
+
+        res.json(results);
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch favorite data', error: error.message });
+    }
+});
 
 
 // Start Server
