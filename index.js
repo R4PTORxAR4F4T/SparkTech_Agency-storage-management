@@ -479,7 +479,7 @@ app.get('/control/data', authMiddleware, async (req, res) => {
 //All Favorite
 app.get('/control/favorites', authMiddleware, async (req, res) => {
     try {
-        const types = ['image', 'folder', 'note', 'pdf']; // Replace with actual types
+        const types = ['image', 'folder', 'note', 'pdf']; 
         const results = {};
 
         for (const type of types) {
@@ -491,6 +491,35 @@ app.get('/control/favorites', authMiddleware, async (req, res) => {
         res.json(results);
     } catch (error) {
         res.status(500).json({ message: 'Failed to fetch favorite data', error: error.message });
+    }
+});
+
+//By Data
+app.get('/control/data/by-date', authMiddleware, async (req, res) => {
+    try {
+        const { date } = req.query;
+        if (!date) return res.status(400).json({ message: 'Date is required' });
+
+        const targetDate = new Date(date);
+        if (isNaN(targetDate.getTime())) return res.status(400).json({ message: 'Invalid date format' });
+
+        const types = ['image', 'folder', 'note', 'pdf'];
+        const results = {};
+
+        for (const type of types) {
+            const collection = getCollectionByType(type);
+            const data = await collection.find({
+                createdAt: {
+                    $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
+                    $lt: new Date(targetDate.setHours(23, 59, 59, 999))
+                }
+            }).toArray();
+            results[type] = data;
+        }
+
+        res.json(results);
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch data', error: error.message });
     }
 });
 
